@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: robogame
+Version: 0.1.0
+Summary: Add your description here
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+
+# RoboGame 机器人方块任务控制系统
+
+机器人方块收集-放置-搭建任务控制系统，基于树莓派主控的"感知-决策-执行-反馈"分层闭环架构。

@@ -1,6 +1,6 @@
-from ..common.fsm import State
-from ..common.types import Position, Block, BuildTarget
-from ..common.error import ErrorCode
+from .fsm import State
+from .types import Position, Block, BuildTarget
+from .error import ErrorCode
 
 
 class Status:
