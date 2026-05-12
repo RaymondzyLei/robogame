@@ -53,7 +53,18 @@ class BuildEvent(Enum):
     EXCEPTION = 'build:exception'
 
 
+class DataHubEvent(Enum):
+    WRITE = 'datahub:write'
+    READ = 'datahub:read'
+    DATA_RETURN = 'datahub:data_return'
+    ACK = 'datahub:ack'
+    DATA_CHANGED = 'datahub:data_changed'
+    SAFETY_SHUTDOWN = 'datahub:safety_shutdown'
+    COMMUNICATION_EXCEPTION = 'datahub:communication_exception'
+
+
 class ModuleEvent(Enum):
+    HEARTBEAT = 'module:heartbeat'
     EXCEPTION = 'module:exception'
     RETRY = 'module:retry'
     TERMINATE = 'module:terminate'

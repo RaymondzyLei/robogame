@@ -106,3 +106,20 @@ class ErrorInfo:
             'desc': self.desc,
             'timestamp': self.timestamp
         }
+
+
+@dataclass
+class HeartbeatInfo:
+    """心跳信息"""
+    module_name: str
+    timestamp: float = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = time.time()
+
+    def to_dict(self):
+        return {
+            'module_name': self.module_name,
+            'timestamp': self.timestamp
+        }

@@ -10,6 +10,7 @@
 6. [模块间通信实战](#6-模块间通信实战)
 7. [常见问题](#7-常见问题)
 8. [API 参考](#8-api-参考)
+9. [高级功能](#9-高级功能)
 
 ---
 
@@ -887,7 +888,8 @@ from robogame.common.types import (
     Position,    # 位置 (x, y, z)
     Pose,        # 位姿 (x, y, z, yaw, pitch, roll)
     CubeInfo,    # 方块信息
-    ModuleStatus # 模块状态
+    ModuleStatus, # 模块状态
+    HeartbeatInfo # 心跳信息
 )
 
 # 创建位置
@@ -895,7 +897,172 @@ pos = Position(x=100, y=200, z=50)
 
 # 创建模块状态
 status = ModuleStatus(code=1, msg="navigating", error_code=0)
+
+# 创建心跳信息
+heartbeat = HeartbeatInfo(module_name='vision_module')
 ```
+
+### 8.5 任务调度类型
+
+```python
+from robogame.common.scheduler import (
+    TaskScheduler,   # 任务调度器
+    HeartbeatManager, # 心跳管理器
+    TaskPriority,   # 任务优先级枚举
+    TaskState,      # 任务状态枚举
+    Task            # 任务对象
+)
+
+# 任务优先级
+TaskPriority.LOW      # 低优先级 (0)
+TaskPriority.NORMAL   # 普通优先级 (1)
+TaskPriority.HIGH     # 高优先级 (2)
+TaskPriority.CRITICAL # 紧急优先级 (3)
+
+# 任务状态
+TaskState.PENDING     # 待执行
+TaskState.RUNNING     # 运行中
+TaskState.SUSPENDED   # 已挂起
+TaskState.COMPLETED   # 已完成
+TaskState.CANCELLED   # 已取消
+```
+
+---
+
+## 9. 高级功能
+
+### 9.1 订阅推送模式
+
+订阅指定的 DataHub key，数据变化时自动推送通知，无需反复发送 `read` 请求。
+
+```python
+from robogame.common.datahub import get_datahub
+
+datahub = get_datahub()
+
+# 定义回调函数
+def on_cube_position_changed(key, value):
+    print(f"Cube position updated: {value}")
+
+# 订阅vision:cube_position的数据变化
+datahub.subscribe('vision:cube_position', on_cube_position_changed)
+
+# 当vision模块写入数据时，回调会自动被调用
+datahub.write('vision:cube_position', {'x': 100, 'y': 200})
+
+# 取消订阅
+datahub.unsubscribe('vision:cube_position', on_cube_position_changed)
+```
+
+### 9.2 同步读写（ACK模式）
+
+支持同步写入/读取，需要等待 ACK 或数据返回。
+
+```python
+# 同步写入，等待ACK，超时返回False（默认超时1秒）
+result = datahub.write_with_ack('vision:cube_position', {'x': 100})
+print(f"写入成功: {result}")
+
+# 同步读取，等待数据返回，超时返回(None, False)
+data, success = datahub.read_with_ack('vision:cube_position')
+if success:
+    print(f"读取成功: {data}")
+```
+
+### 9.3 心跳保活
+
+所有模块可以启动心跳管理器，每秒自动发送心跳到 DataHub。
+
+```python
+from robogame.common.scheduler import get_heartbeat_manager
+
+# 创建心跳管理器（每个模块有自己的名称）
+heartbeat_mgr = get_heartbeat_manager('vision_module')
+
+# 启动心跳（自动每秒发送一次）
+heartbeat_mgr.start()
+
+# 停止心跳
+heartbeat_mgr.stop()
+
+# 手动发送心跳
+heartbeat_mgr.send_heartbeat()
+
+# 检查模块状态
+status = datahub.get_module_status('vision_module')
+# 'online' / 'offline' / 'unknown'
+```
+
+**注意**：当模块失联超过 5 秒（可配置），DataHub 会触发安全机制，发送 `datahub:safety_shutdown` 事件。
+
+### 9.4 数据持久化
+
+关键数据会自动持久化到 JSON 文件，重启后可恢复。
+
+```python
+# DataHub启动时自动加载持久化数据
+datahub = get_datahub(persistence_dir='data')
+
+# 手动触发持久化
+datahub.persist_now()
+
+# 持久化的数据包括：任务参数、状态、异常记录等
+```
+
+### 9.5 动态任务调度器
+
+任务调度器支持优先级、抢占、中断恢复、可随时切换目标方块。
+
+```python
+from robogame.common.scheduler import get_task_scheduler, TaskPriority
+
+scheduler = get_task_scheduler()
+
+# 创建任务（优先级：LOW=0, NORMAL=1, HIGH=2, CRITICAL=3）
+task_id = scheduler.create_task(
+    task_type='collect',      # 'collect' / 'place' / 'build'
+    target={'x': 100, 'y': 200},
+    priority=TaskPriority.HIGH,
+    cube_id=1
+)
+
+# 抢占式调度（中断当前任务，优先执行新任务）
+scheduler.preempt_task('collect', {'x': 300, 'y': 400}, TaskPriority.CRITICAL, cube_id=2)
+
+# 切换任务目标（如中途切换目标方块）
+scheduler.switch_target(task_id, {'x': 500, 'y': 500})
+
+# 挂起当前任务
+scheduler.suspend_current_task('manual')
+
+# 恢复被挂起的任务
+scheduler.resume_task(task_id)
+
+# 模拟任务完成
+scheduler.on_task_complete(task_id, {'success': True})
+
+# 获取任务状态
+status = scheduler.get_task_status(task_id)
+print(f"任务状态: {status}")
+
+# 获取待执行任务列表
+pending = scheduler.get_pending_tasks()
+print(f"待执行任务: {len(pending)}个")
+
+# 获取当前运行中的任务
+running = scheduler.get_running_task()
+print(f"运行中任务: {running}")
+```
+
+**任务优先级**：
+| 优先级 | 值 | 说明 |
+|--------|-----|------|
+| `LOW` | 0 | 低优先级 |
+| `NORMAL` | 1 | 普通优先级（默认） |
+| `HIGH` | 2 | 高优先级 |
+| `CRITICAL` | 3 | 紧急优先级，可抢占当前任务 |
+
+**任务状态**：`PENDING` → `RUNNING` → `COMPLETED` / `SUSPENDED` → `CANCELLED`
 
 ---
 

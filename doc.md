@@ -225,10 +225,10 @@ graph TD
 #### 7.1.1 模块职责与通信边界
 | 模块 | 核心职责 | 数据操作方式 | Blinker事件交互 |
 |------|----------|--------------|----------------|
-| DataHub数据中心 | 全局数据唯一管理，线程安全保障 | 仅通过内部逻辑处理数据，不对外暴露接口 | 监听：`datahub:write`/`datahub:read`；发送：`datahub:data_return` |
-| 视觉模块 | 环境感知与校验 | 写数据：发送`datahub:write`事件；读数据：发送`datahub:read`事件，监听`datahub:data_return`事件 | 发送：`vision_data_updated`/`grab_check_done`/`place_check_done`；监听：`adjust_recognize_param` |
-| 树莓派策略模块 | 任务调度与决策 | 写数据：发送`datahub:write`事件；读数据：发送`datahub:read`事件，监听`datahub:data_return`事件 | 发送：`start_collect`/`start_place`/`start_build`/`adjust_recognize_param`；监听：`vision_data_updated`/`collect_status`/`place_status`/`build_status` |
-| 收集/放置/搭建模块 | 动作执行与状态反馈 | 写数据：发送`datahub:write`事件；读数据：发送`datahub:read`事件，监听`datahub:data_return`事件 | 发送：`collect_status`/`place_status`/`build_status`/`module_exception`；监听：`start_collect`/`start_place`/`start_build`/`module_retry` |
+| DataHub数据中心 | 全局数据唯一管理，线程安全保障，支持订阅推送、心跳监控、ACK重传、持久化 | 监听：`datahub:write`/`datahub:read`/`datahub:ack`；发送：`datahub:data_return`/`datahub:data_changed`/`datahub:safety_shutdown` |
+| 视觉模块 | 环境感知与校验 | 写数据：发送`datahub:write`事件；读数据：发送`datahub:read`事件，监听`datahub:data_return`/`datahub:data_changed`事件；订阅：`datahub:data_changed` | 发送：`vision_data_updated`/`grab_check_done`/`place_check_done`/`module:heartbeat`；监听：`adjust_recognize_param` |
+| 树莓派策略模块 | 任务调度与决策（含动态任务调度器） | 写数据：发送`datahub:write`事件；读数据：发送`datahub:read`事件，监听`datahub:data_return`/`datahub:data_changed`事件；订阅：关键数据变更；心跳：每秒发送 | 发送：`start_collect`/`start_place`/`start_build`/`adjust_recognize_param`/`module:heartbeat`；监听：`vision_data_updated`/`collect_status`/`place_status`/`build_status` |
+| 收集/放置/搭建模块 | 动作执行与状态反馈 | 写数据：发送`datahub:write`事件；读数据：发送`datahub:read`事件，监听`datahub:data_return`/`datahub:data_changed`事件；订阅：任务参数变更；心跳：每秒发送 | 发送：`collect_status`/`place_status`/`build_status`/`module:exception`/`module:heartbeat`；监听：`start_collect`/`start_place`/`start_build`/`module_retry` |
 
 #### 7.1.2 通信方式与数据格式
 | 交互类型 | 通信方式 | 数据格式 | 传输规则 |
@@ -243,6 +243,10 @@ graph TD
 | `datahub:write` | 所有业务模块 | DataHub | `{"key":"vision:cube_position","value":"{\"x\":100,\"y\":200,\"z\":50}","timestamp":1718000000}` | 业务模块需要向DataHub写入数据时 |
 | `datahub:read` | 所有业务模块 | DataHub | `{"key":"strategy:collect_param","request_id":"req_123456"}` | 业务模块需要从DataHub读取数据时 |
 | `datahub:data_return` | DataHub | 对应读请求模块 | `{"request_id":"req_123456","key":"strategy:collect_param","value":"{\"target_id\":1,\"threshold\":5}"}` | DataHub完成读请求后，向请求模块返回数据时 |
+| `datahub:ack` | DataHub | 所有业务模块 | `{"request_id":"req_123456","key":"strategy:collect_param","success":true}` | DataHub完成写/读请求后，发送ACK确认 |
+| `datahub:data_changed` | DataHub | 订阅了该key的模块 | `{"key":"vision:cube_position","value":"{\"x\":100}"}` | 当订阅的key数据发生变化时主动推送 |
+| `datahub:safety_shutdown` | DataHub | 所有模块 | `{"module":"vision"}` | 检测到模块失联，触发安全停机 |
+| `datahub:communication_exception` | DataHub | 策略模块 | `{"key":"vision:cube_position","operation":"write"}` | 通信超时/失败，上报通信异常 |
 
 #### 7.2.2 业务事件
 | 事件名称 | 发送模块 | 监听模块 | 事件载荷（示例） | 触发场景 |
@@ -252,6 +256,7 @@ graph TD
 | `strategy:start_collect` | 策略模块 | 收集模块 | `{"request_id":"req_789014","data_key":"strategy:collect_param"}` | 策略模块发送`datahub:write`事件写入收集参数后，启动收集模块时 |
 | `collect:status_updated` | 收集模块 | 策略模块 | `{"request_id":"req_789015","data_key":"collect:status_code"}` | 收集模块发送`datahub:write`事件更新状态码后 |
 | `module:exception` | 执行模块 | 策略模块 | `{"request_id":"req_789016","data_key":"module:error_info"}` | 任意执行模块触发异常，发送`datahub:write`事件写入错误信息后 |
+| `module:heartbeat` | 所有模块 | DataHub | `{"module":"vision","timestamp":1718000000}` | 所有模块每秒发送一次心跳，DataHub监控在线状态 |
 | `strategy:module_retry` | 策略模块 | 执行模块 | `{"request_id":"req_789017","data_key":"strategy:retry_param"}` | 策略模块发送`datahub:write`事件写入重试参数后，触发模块重试时 |
 
 ### 7.3 DataHub核心数据键定义
@@ -263,8 +268,111 @@ graph TD
 | `strategy:collect_param` | JSON | 策略模块 | 收集模块启动参数（目标方块ID、导航阈值等） |
 | `collect:status` | JSON | 收集模块 | 收集模块状态（`{"code":1,"msg":"navigating","error":0}`） |
 | `module:error_info` | JSON | 执行模块 | 异常信息（`{"error_code":2,"error_type":"navigation_fail","desc":"路径堵塞"}`） |
+| `scheduler:suspend_point` | JSON | 任务调度器 | 中断恢复点（`{"task_id":"xxx","task_type":"collect","reason":"safety_shutdown"}`） |
 
-## 8. 测试与验证方案
+## 8. 高级特性
+
+### 8.1 订阅推送模式
+
+模块可以订阅指定的 DataHub key，当该 key 的数据发生变化时，DataHub 会主动推送数据给订阅者，无需反复发送 `datahub:read` 事件。
+
+```python
+# 订阅vision:cube_position的数据变化
+def on_cube_position_changed(key, value):
+    print(f"Cube position updated: {value}")
+
+datahub.subscribe('vision:cube_position', on_cube_position_changed)
+
+# 当vision模块写入数据时，订阅者会自动收到通知
+datahub.write('vision:cube_position', {'x': 100, 'y': 200})
+```
+
+**适用场景**：视觉模块实时更新方块位置，策略/执行模块需要立即获取最新数据。
+
+### 8.2 事件ACK + 超时重传
+
+所有 `datahub:write` 和 `datahub:read` 操作都需要等待 DataHub 返回 ACK：
+- 超时时间：默认 1 秒
+- 最大重传次数：2 次
+- 超过最大重传次数后，触发 `datahub:communication_exception` 事件
+
+```python
+# 同步写入，等待ACK，超时返回False
+result = datahub.write_with_ack('vision:cube_position', {'x': 100}, timeout=1.0)
+
+# 同步读取，等待数据返回，超时返回(None, False)
+data, success = datahub.read_with_ack('vision:cube_position', timeout=1.0)
+```
+
+### 8.3 心跳保活机制
+
+所有模块每秒发送一次 `module:heartbeat` 事件到 DataHub，DataHub 监控各模块的在线状态：
+- 心跳间隔：1 秒
+- 心跳超时时间：5 秒（可配置）
+- 模块失联后，自动触发安全机制，发送 `datahub:safety_shutdown` 事件
+
+```python
+# 每个模块启动心跳管理器
+heartbeat_mgr = get_heartbeat_manager('vision_module')
+heartbeat_mgr.start()  # 自动每秒发送心跳
+
+# 手动发送心跳
+heartbeat_mgr.send_heartbeat()
+
+# 检查模块状态
+status = datahub.get_module_status('vision_module')
+# online / offline / unknown
+```
+
+### 8.4 轻量持久化
+
+DataHub 自动将关键数据持久化到 JSON 文件，重启后可恢复：
+- 持久化目录：默认 `data/`
+- 持久化的key：`strategy:task_param`、`strategy:collect_param`、`collect:status`、`module:error_info` 等
+- 手动触发持久化：`datahub.persist_now()`
+
+```python
+# DataHub启动时自动加载持久化数据
+datahub = get_datahub(persistence_dir='data')
+
+# 手动触发持久化
+datahub.persist_now()
+```
+
+### 8.5 动态任务调度器
+
+TaskScheduler 支持任务优先级、抢占、中断恢复、可随时切换目标方块。
+
+```python
+scheduler = get_task_scheduler()
+
+# 创建任务（优先级：LOW=0, NORMAL=1, HIGH=2, CRITICAL=3）
+task_id = scheduler.create_task(
+    task_type='collect',
+    target={'x': 100, 'y': 200},
+    priority=TaskPriority.HIGH,
+    cube_id=1
+)
+
+# 抢占式调度（中断当前任务，优先执行新任务）
+scheduler.preempt_task('collect', {'x': 300}, TaskPriority.CRITICAL, cube_id=2)
+
+# 切换任务目标（如切换目标方块）
+scheduler.switch_target(task_id, {'x': 500, 'y': 500})
+
+# 挂起当前任务
+scheduler.suspend_current_task('manual')
+
+# 恢复被挂起的任务
+scheduler.resume_task(task_id)
+
+# 任务完成回调
+scheduler.on_task_complete(task_id, {'success': True})
+```
+
+**任务状态**：`PENDING` → `RUNNING` → `COMPLETED` / `SUSPENDED` → `CANCELLED`
+
+## 9. 测试与验证方案
 ### 8.1 单元测试
 - 视觉模块：测试不同光照/遮挡下识别准确率（置信度≥90%），验证`datahub:write`事件发送成功率、DataHub数据写入及时性，以及`datahub:read`/`datahub:data_return`事件的交互一致性；
 - 动作执行模块：单独测试导航精度（误差≤±5mm）、抓取/放置成功率（≥95%），验证`datahub:write`事件写入执行状态的准确性、`datahub:read`事件获取参数的完整性；
@@ -282,8 +390,8 @@ graph TD
 - 通信参数调优：调整`datahub:read`/`datahub:data_return`事件的超时阈值，优化request_id生成规则，提升数据读取效率；
 - 异常场景强化：补充现场高频异常类型（如临时遮挡、通信抖动），优化异常状态的`datahub:write`事件触发逻辑与业务事件联动规则。
 
-## 9. 附录：状态码与错误码定义
-### 9.1 状态码定义
+## 10. 附录：状态码与错误码定义
+### 10.1 状态码定义
 | 状态码 | 含义 |
 |--------|------|
 | 0 | 初始化定位状态 |
@@ -292,7 +400,7 @@ graph TD
 | 3 | 模块任务结束状态 |
 | -1 | 异常处理状态 |
 
-### 9.2 错误码定义
+### 10.2 错误码定义
 | 错误码 | 含义 |
 |--------|------|
 | 0 | 无错误，执行正常 |
