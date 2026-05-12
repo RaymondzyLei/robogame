@@ -1,4 +1,5 @@
-from .camera import Camera
-from .detector import VisionModule
+"""Vision视觉模块"""
 
-__all__ = ["Camera", "VisionModule"]
+from .camera import VisionModule, get_vision_module
+
+__all__ = ['VisionModule', 'get_vision_module']

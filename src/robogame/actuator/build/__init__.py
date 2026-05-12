@@ -1,3 +1,5 @@
-from .build import BuildModule
+"""Build搭建子模块"""
 
-__all__ = ["BuildModule"]
+from .build import BuildModule, get_build_module
+
+__all__ = ['BuildModule', 'get_build_module']

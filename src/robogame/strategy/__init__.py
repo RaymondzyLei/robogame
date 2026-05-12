@@ -1,3 +1,5 @@
-from .scheduler import TaskScheduler, TaskPhase
+"""Strategy策略模块"""
 
-__all__ = ["TaskScheduler", "TaskPhase"]
+from .scheduler import StrategyModule, get_strategy_module
+
+__all__ = ['StrategyModule', 'get_strategy_module']

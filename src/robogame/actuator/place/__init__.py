@@ -1,3 +1,5 @@
-from .place import PlaceModule
+"""Place放置子模块"""
 
-__all__ = ["PlaceModule"]
+from .place import PlaceModule, get_place_module
+
+__all__ = ['PlaceModule', 'get_place_module']
