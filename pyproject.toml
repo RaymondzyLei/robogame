@@ -5,7 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "adafruit-circuitpython-pca9685>=3.4.22",
     "blinker>=1.9.0",
+    "opencv-python>=4.13.0.92",
 ]
 
 [tool.uv.workspace]
