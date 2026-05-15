@@ -1,7 +1,7 @@
 """放置方块模块 - 动作执行与状态反馈"""
 import time
 import uuid
-from typing import Callable
+from typing import Callable, Optional
 from blinker import signal
 
 from ...common.datahub import get_datahub
@@ -9,15 +9,32 @@ from ...common.events import (
     DataHubEvent, PlaceEvent, VisionEvent, ModuleEvent, StrategyEvent
 )
 from ...common.types import StatusCode, ErrorCode, ModuleStatus
+from ...hardware.motion import MotionController, get_motion_controller
+from ...hardware.gripper import GripperController, get_gripper_controller
 
 
 class PlaceModule:
     """放置方块模块，负责控制机器人执行放置动作"""
 
-    def __init__(self):
+    def __init__(self,
+                 left_motor_channel: int = 0,
+                 right_motor_channel: int = 1,
+                 gripper_channel: int = 2):
+        """初始化放置模块
+
+        Args:
+            left_motor_channel: 左轮电机PWM通道
+            right_motor_channel: 右轮电机PWM通道
+            gripper_channel: 机械爪伺服PWM通道
+        """
         self._datahub = get_datahub()
         self._running = False
 
+        # 硬件控制器（从模块化运动控制获取）
+        self._motion = get_motion_controller(left_motor_channel, right_motor_channel)
+        self._gripper = get_gripper_controller(gripper_channel)
+
+        # 事件信号
         self._status_updated_signal = signal(PlaceEvent.STATUS_UPDATED.value)
         self._init_complete_signal = signal(PlaceEvent.INIT_COMPLETE.value)
         self._navigating_signal = signal(PlaceEvent.NAVIGATING.value)
@@ -26,24 +43,18 @@ class PlaceModule:
         self._exception_signal = signal(PlaceEvent.EXCEPTION.value)
 
         self._pending_reads: dict = {}
-        self._current_status = None
+        self._current_status: Optional[ModuleStatus] = None
         self._state = StatusCode.INIT
+        self._target_position: Optional[dict] = None
 
         self._setup_listeners()
 
     def _setup_listeners(self):
         """设置事件监听"""
-        data_return_signal = signal(DataHubEvent.DATA_RETURN.value)
-        data_return_signal.connect(self._handle_data_return)
-
-        start_signal = signal(StrategyEvent.START_PLACE.value)
-        start_signal.connect(self._handle_start_place)
-
-        vision_place_check_signal = signal(VisionEvent.PLACE_CHECK_DONE.value)
-        vision_place_check_signal.connect(self._handle_place_check_done)
-
-        module_retry_signal = signal(StrategyEvent.MODULE_RETRY.value)
-        module_retry_signal.connect(self._handle_module_retry)
+        signal(DataHubEvent.DATA_RETURN.value).connect(self._handle_data_return)
+        signal(StrategyEvent.START_PLACE.value).connect(self._handle_start_place)
+        signal(VisionEvent.PLACE_CHECK_DONE.value).connect(self._handle_place_check_done)
+        signal(StrategyEvent.MODULE_RETRY.value).connect(self._handle_module_retry)
 
     def _handle_data_return(self, sender, request_id: str, key: str, value):
         """处理datahub:data_return事件"""
@@ -59,7 +70,6 @@ class PlaceModule:
                 self._execute_init_state(param)
             else:
                 self._send_exception(ErrorCode.COMMUNICATION_FAIL, "Failed to get place param")
-
         self._read_datahub(data_key, handle_param)
 
     def _handle_place_check_done(self, sender, request_id: str, data_key: str):
@@ -74,7 +84,6 @@ class PlaceModule:
                     self._send_exception(ErrorCode.ACTION_FAIL, "Place check failed")
             else:
                 self._send_exception(ErrorCode.COMMUNICATION_FAIL, "Failed to get place check result")
-
         self._read_datahub(data_key, handle_check_result)
 
     def _handle_module_retry(self, sender, request_id: str, data_key: str):
@@ -102,7 +111,6 @@ class PlaceModule:
         """更新模块状态"""
         self._current_status = ModuleStatus(code=code, msg=msg, error_code=error_code)
         self._write_datahub('place:status', self._current_status.to_dict())
-
         request_id = str(uuid.uuid4())
         self._status_updated_signal.send(self, request_id=request_id, data_key='place:status')
 
@@ -114,12 +122,9 @@ class PlaceModule:
             'desc': desc,
             'timestamp': time.time()
         }
-
         self._write_datahub('module:error_info', error_info)
-
         request_id = str(uuid.uuid4())
         self._exception_signal.send(self, request_id=request_id, data_key='module:error_info')
-
         self._update_status(StatusCode.ERROR, desc, error_code)
 
     def _get_error_type(self, error_code: int) -> str:
@@ -137,7 +142,6 @@ class PlaceModule:
         """转换到完成状态"""
         self._state = StatusCode.COMPLETE
         self._update_status(StatusCode.COMPLETE, "Place task completed", ErrorCode.NONE)
-
         request_id = str(uuid.uuid4())
         self._task_complete_signal.send(self, request_id=request_id, data_key='place:status')
 
@@ -146,36 +150,64 @@ class PlaceModule:
         self._state = StatusCode.INIT
         self._update_status(StatusCode.INIT, "Initializing", ErrorCode.NONE)
 
-        target_position = param.get('target_position', {})
-        print(f"[Place] Initializing, target: {target_position}")
+        self._target_position = param.get('target_position', {})
+        print(f"[Place] Initializing, target: {self._target_position}")
 
+        # 发送初始化完成事件
         request_id = str(uuid.uuid4())
         self._init_complete_signal.send(self, request_id=request_id, data_key='place:status')
 
+        # 进入导航状态
         self._state = StatusCode.NAVIGATE
         self._execute_navigate_state(param)
 
     def _execute_navigate_state(self, param: dict):
         """执行导航状态"""
         self._update_status(StatusCode.NAVIGATE, "Navigating to target", ErrorCode.NONE)
-
         request_id = str(uuid.uuid4())
         self._navigating_signal.send(self, request_id=request_id, data_key='place:status')
 
-        target_position = param.get('target_position', {})
-        print(f"[Place] Navigating to {target_position}")
+        target = param.get('target_position', {})
+        target_x = target.get('x', 0)
+        target_y = target.get('y', 0)
 
-        self._state = StatusCode.ACTION
-        self._execute_action_state(param)
+        print(f"[Place] Navigating to ({target_x}, {target_y})")
+
+        # 使用运动控制器移动到目标位置
+        def progress_callback(progress):
+            self._write_datahub('place:progress', {'progress': progress})
+
+        success = self._motion.go_to_position(target_x, target_y, threshold=5.0,
+                                               speed=2048, progress_callback=progress_callback)
+
+        if success:
+            print(f"[Place] Arrived at target")
+            self._state = StatusCode.ACTION
+            self._execute_action_state(param)
+        else:
+            self._send_exception(ErrorCode.NAVIGATION_FAIL, "Failed to reach target")
 
     def _execute_action_state(self, param: dict):
         """执行放置动作状态"""
         self._update_status(StatusCode.ACTION, "Placing cube", ErrorCode.NONE)
-
         request_id = str(uuid.uuid4())
         self._placing_signal.send(self, request_id=request_id, data_key='place:status')
 
         print("[Place] Executing place action")
+
+        # 使用机械爪执行放置（张开）
+        self._gripper.open()
+        print("[Place] Gripper opened")
+
+        # 通知视觉模块进行放置校验
+        check_key = 'vision:place_check_result'
+        vision_check = self._datahub.get(check_key)
+
+        if vision_check and vision_check.get('result'):
+            self._transition_to_complete()
+        else:
+            # 需要等待视觉校验结果，由视觉模块触发PLACE_CHECK_DONE事件
+            pass
 
     def start(self):
         """启动放置模块"""
@@ -185,6 +217,7 @@ class PlaceModule:
     def stop(self):
         """停止放置模块"""
         self._running = False
+        self._motion.stop()
         print("[Place] Place module stopped")
 
     def on_status_updated(self, callback: Callable):
@@ -199,7 +232,17 @@ class PlaceModule:
         """注册异常回调"""
         self._exception_signal.connect(callback)
 
+    def get_motion_controller(self) -> MotionController:
+        """获取运动控制器（用于外部控制导航）"""
+        return self._motion
 
-def get_place_module() -> PlaceModule:
+    def get_gripper_controller(self) -> GripperController:
+        """获取机械爪控制器（用于外部控制抓取）"""
+        return self._gripper
+
+
+def get_place_module(left_motor_channel: int = 0,
+                     right_motor_channel: int = 1,
+                     gripper_channel: int = 2) -> PlaceModule:
     """获取放置模块单例"""
-    return PlaceModule()
+    return PlaceModule(left_motor_channel, right_motor_channel, gripper_channel)

@@ -220,9 +220,260 @@ graph TD
 7. **异常处理**：
    - 任意阶段触发异常时，按5.2节流程执行，所有状态与指令均通过「datahub:write」事件通知DataHub写入，通过Blinker触发联动逻辑。
 
-## 7. 接口与通信设计
-### 7.1 核心架构设计
-#### 7.1.1 模块职责与通信边界
+## 7. 硬件抽象层（HAL）
+
+硬件抽象层（Hardware Abstraction Layer）将底层硬件控制封装为统一接口，使上层业务逻辑无需关心具体硬件实现。
+
+### 7.1 硬件架构概览
+
+```
+                    ┌─────────────────┐
+                    │   业务逻辑层    │
+                    │  (Actuator模块)  │
+                    └────────┬────────┘
+                             │
+              ┌──────────────┼──────────────┐
+              │              │              │
+              ▼              ▼              ▼
+    ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+    │MotionController│ │GripperController│ │ArmController│
+    │  运动控制   │ │  机械爪控制  │ │  机械臂控制  │
+    └──────┬──────┘ └──────┬──────┘ └──────┬──────┘
+           │               │               │
+           ▼               ▼               ▼
+    ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+    │ DCMotor /   │ │  ServoController │ │  ServoController │
+    │ StepperMotor│ │  (GripperServo) │ │  (ArmServo)     │
+    └──────┬──────┘ └──────┬──────┘ └──────┬──────┘
+           │               │               │
+           └───────────────┼───────────────┘
+                           ▼
+                 ┌─────────────────┐
+                 │  PCA9685Driver  │
+                 │  16通道PWM驱动  │
+                 └────────┬────────┘
+                          │
+                 ┌────────┴────────┐
+                 │   I2C总线       │
+                 │  (SCL/SDA)      │
+                 └─────────────────┘
+```
+
+### 7.2 PCA9685 PWM驱动板
+
+PCA9685是16通道、12位分辨率的PWM芯片，通过I2C与主控通信。
+
+```python
+from robogame.hardware import PCA9685Driver, get_pca9685_driver
+
+# 获取驱动单例
+driver = get_pca9685_driver()
+
+# 在Raspberry Pi上初始化
+import busio
+from board import SCL, SDA
+i2c = busio.I2C(SCL, SDA)
+driver.initialize(i2c, address=0x40)
+
+# 设置PWM频率（伺服电机用50Hz）
+driver.frequency = 50
+
+# 控制单个通道
+channel = driver.get_channel(0)
+channel.duty_cycle = 2048  # 50%占空比
+
+# 直接设置脉冲宽度（微秒）
+driver.set_pulse_width(0, 1500)  # 1500us
+
+# 禁用通道
+driver.disable_channel(0)
+```
+
+### 7.3 电机控制器
+
+#### 直流电机（ DCMotor）
+
+```python
+from robogame.hardware import DCMotor, get_dc_motor
+
+# 创建直流电机（左轮）
+left_motor = get_dc_motor(pwm_channel=0, dir_channel=1)
+
+# 控制
+left_motor.forward(2048)    # 正转，速度2048
+left_motor.backward(1024)   # 反转，速度1024
+left_motor.stop()           # 停止
+```
+
+#### 步进电机（StepperMotor）
+
+```python
+from robogame.hardware import StepperMotor, get_stepper_motor
+
+# 4相步进电机（连接A+, A-, B+, B-四个通道）
+stepper = get_stepper_motor([0, 1, 2, 3])
+
+# 执行一步
+stepper.step(direction=1)   # 正转
+stepper.step(direction=-1)  # 反转
+
+# 释放电机
+stepper.release()
+```
+
+### 7.4 伺服电机控制器
+
+#### 普通伺服电机（用于角度控制）
+
+```python
+from robogame.hardware import ServoController, get_servo_controller
+
+# 创建伺服控制器（通道2）
+servo = get_servo_controller(channel=2)
+
+# 设置角度（0-180度）
+servo.set_angle(90)   # 转到90度
+servo.set_angle(0)    # 转到0度
+servo.center()        # 转到中心90度
+
+# 禁用输出
+servo.disable()
+```
+
+#### 连续旋转伺服（用于轮子）
+
+```python
+from robogame.hardware import ContinuousRotationServo, get_continuous_servo
+
+# 连续旋转伺服（用于移动）
+cr_servo = get_continuous_servo(channel=0)
+
+cr_servo.set_speed(50)   # 正向旋转，速度50
+cr_servo.set_speed(-30)  # 反向旋转，速度30
+cr_servo.stop()          # 停止
+```
+
+### 7.5 运动控制器（所有执行模块共用）
+
+```python
+from robogame.hardware import MotionController, get_motion_controller
+
+# 创建运动控制器（左轮通道0，右轮通道1）
+motion = get_motion_controller(left_motor_channel=0, right_motor_channel=1)
+
+# 基本移动
+motion.move_forward(2048)   # 向前
+motion.move_backward(1024)  # 向后
+motion.turn_left(2048)      # 原地左转
+motion.turn_right(2048)     # 原地右转
+motion.stop()               # 停止
+
+# 导航到目标位置
+def progress_callback(progress):
+    print(f"进度: {progress * 100:.1f}%")
+
+motion.go_to_position(x=100, y=200, threshold=5.0, speed=2048, progress_callback=progress_callback)
+
+# 旋转到目标角度
+motion.rotate_to_angle(target_yaw=45, threshold=5.0)
+
+# 获取/设置当前位姿
+pose = motion.get_pose()  # {'x': 0, 'y': 0, 'yaw': 0}
+motion.set_pose(x=50, y=50, yaw=90)
+```
+
+### 7.6 机械爪控制器
+
+```python
+from robogame.hardware import GripperController, get_gripper_controller
+
+# 创建机械爪控制器（伺服通道3）
+gripper = get_gripper_controller(servo_channel=3)
+
+# 控制张合
+gripper.open()      # 张开
+gripper.close()     # 闭合
+gripper.toggle()    # 切换状态
+
+# 检查状态
+is_closed = gripper.is_closed()  # True表示闭合
+
+# 设置张合角度
+gripper.set_open_angle(0)    # 张开时0度
+gripper.set_close_angle(90)   # 闭合时90度
+
+# 执行抓取/释放
+gripper.grab()    # 抓取（闭合）
+gripper.release() # 释放（张开）
+```
+
+### 7.7 机械臂控制器（BuildModule专用）
+
+```python
+from robogame.hardware import ArmController, get_arm_controller
+
+# 创建机械臂控制器（底座、肩、肘、腕）
+arm = get_arm_controller(base_channel=3, shoulder_channel=4,
+                          elbow_channel=5, wrist_channel=6)
+
+# 控制各关节角度
+arm.move_joint('base', 90)      # 底座旋转90度
+arm.move_joint('shoulder', 45)  # 肩部45度
+arm.move_joint('elbow', 90)      # 肘部90度
+arm.move_joint('wrist', 0)       # 腕部0度
+
+# 预设动作
+arm.set_home()        # 回到初始位置
+arm.reach_forward()   # 向前伸出
+arm.reach_down()      # 向下伸出（抓取）
+arm.lift_up()         # 抬起
+
+# 释放所有关节
+arm.release_all()
+```
+
+### 7.8 执行模块的硬件配置
+
+三个执行模块（Collect/Place/Build）共用相同的运动控制器，但各有专用设备：
+
+| 模块 | 运动控制 | 专用设备 |
+|------|----------|----------|
+| CollectModule | MotionController (轮子) | GripperController (机械爪) |
+| PlaceModule | MotionController (轮子) | GripperController (机械爪) |
+| BuildModule | MotionController (轮子) | GripperController (机械爪) + ArmController (机械臂) |
+
+```python
+from robogame import get_collect_module, get_place_module, get_build_module
+
+# CollectModule: 轮子+机械爪
+collect = get_collect_module(
+    left_motor_channel=0,
+    right_motor_channel=1,
+    gripper_channel=2
+)
+motion = collect.get_motion_controller()
+gripper = collect.get_gripper_controller()
+
+# PlaceModule: 轮子+机械爪
+place = get_place_module(
+    left_motor_channel=0,
+    right_motor_channel=1,
+    gripper_channel=2
+)
+
+# BuildModule: 轮子+机械爪+机械臂
+build = get_build_module(
+    left_motor_channel=0,
+    right_motor_channel=1,
+    gripper_channel=2,
+    arm_channels=(3, 4, 5, 6)
+)
+arm = build.get_arm_controller()
+```
+
+## 8. 接口与通信设计
+### 8.1 核心架构设计
+#### 8.1.1 模块职责与通信边界
 | 模块 | 核心职责 | 数据操作方式 | Blinker事件交互 |
 |------|----------|--------------|----------------|
 | DataHub数据中心 | 全局数据唯一管理，线程安全保障，支持订阅推送、心跳监控、ACK重传、持久化 | 监听：`datahub:write`/`datahub:read`/`datahub:ack`；发送：`datahub:data_return`/`datahub:data_changed`/`datahub:safety_shutdown` |
@@ -230,14 +481,14 @@ graph TD
 | 树莓派策略模块 | 任务调度与决策（含动态任务调度器） | 写数据：发送`datahub:write`事件；读数据：发送`datahub:read`事件，监听`datahub:data_return`/`datahub:data_changed`事件；订阅：关键数据变更；心跳：每秒发送 | 发送：`start_collect`/`start_place`/`start_build`/`adjust_recognize_param`/`module:heartbeat`；监听：`vision_data_updated`/`collect_status`/`place_status`/`build_status` |
 | 收集/放置/搭建模块 | 动作执行与状态反馈 | 写数据：发送`datahub:write`事件；读数据：发送`datahub:read`事件，监听`datahub:data_return`/`datahub:data_changed`事件；订阅：任务参数变更；心跳：每秒发送 | 发送：`collect_status`/`place_status`/`build_status`/`module:exception`/`module:heartbeat`；监听：`start_collect`/`start_place`/`start_build`/`module_retry` |
 
-#### 7.1.2 通信方式与数据格式
+#### 8.1.2 通信方式与数据格式
 | 交互类型 | 通信方式 | 数据格式 | 传输规则 |
 |----------|----------|----------|----------|
 | DataHub数据操作 | Blinker事件触发（`datahub:write`/`datahub:read`） | 事件载荷为JSON格式：<br/>- 写事件：`{"key":"模块+数据类型","value":JSON数据,"timestamp":时间戳}`<br/>- 读事件：`{"key":"模块+数据类型","request_id":请求ID}`<br/>- 返回事件：`{"request_id":请求ID,"key":"模块+数据类型","value":JSON数据}` | 写事件：DataHub覆盖式更新内部数据，带时间戳；<br/>读事件：DataHub按key读取数据，通过request_id关联返回事件；<br/>返回事件：仅向发起读请求的模块推送数据 |
 | Blinker业务事件通信 | Blinker信号订阅/发布 | 事件名称+JSON载荷：<br/>- 事件名称：模块+动作（如`vision:grab_check_done`）<br/>- 载荷：`{"request_id":请求ID,"data_key":"模块+数据类型"}` | 业务事件仅传递数据键与请求ID，不传递原始数据；<br/>接收方通过`data_key`发起`datahub:read`事件获取完整数据 |
 
-### 7.2 核心Blinker事件定义
-#### 7.2.1 DataHub交互事件
+### 8.2 核心Blinker事件定义
+#### 8.2.1 DataHub交互事件
 | 事件名称 | 发送模块 | 监听模块 | 事件载荷（示例） | 触发场景 |
 |----------|----------|----------|------------------|----------|
 | `datahub:write` | 所有业务模块 | DataHub | `{"key":"vision:cube_position","value":"{\"x\":100,\"y\":200,\"z\":50}","timestamp":1718000000}` | 业务模块需要向DataHub写入数据时 |
@@ -248,7 +499,7 @@ graph TD
 | `datahub:safety_shutdown` | DataHub | 所有模块 | `{"module":"vision"}` | 检测到模块失联，触发安全停机 |
 | `datahub:communication_exception` | DataHub | 策略模块 | `{"key":"vision:cube_position","operation":"write"}` | 通信超时/失败，上报通信异常 |
 
-#### 7.2.2 业务事件
+#### 8.2.2 业务事件
 | 事件名称 | 发送模块 | 监听模块 | 事件载荷（示例） | 触发场景 |
 |----------|----------|----------|------------------|----------|
 | `vision:data_updated` | 视觉模块 | 策略模块/执行模块 | `{"request_id":"req_789012","data_key":"vision:cube_pose"}` | 视觉模块完成一次环境感知，发送`datahub:write`事件后 |
@@ -259,7 +510,7 @@ graph TD
 | `module:heartbeat` | 所有模块 | DataHub | `{"module":"vision","timestamp":1718000000}` | 所有模块每秒发送一次心跳，DataHub监控在线状态 |
 | `strategy:module_retry` | 策略模块 | 执行模块 | `{"request_id":"req_789017","data_key":"strategy:retry_param"}` | 策略模块发送`datahub:write`事件写入重试参数后，触发模块重试时 |
 
-### 7.3 DataHub核心数据键定义
+### 8.3 DataHub核心数据键定义
 | 数据键 | 数据类型 | 所属模块 | 说明 |
 |--------|----------|----------|------|
 | `vision:cube_position` | JSON | 视觉模块 | 方块的实时坐标（x,y,z）与姿态（yaw,pitch,roll） |
@@ -270,9 +521,9 @@ graph TD
 | `module:error_info` | JSON | 执行模块 | 异常信息（`{"error_code":2,"error_type":"navigation_fail","desc":"路径堵塞"}`） |
 | `scheduler:suspend_point` | JSON | 任务调度器 | 中断恢复点（`{"task_id":"xxx","task_type":"collect","reason":"safety_shutdown"}`） |
 
-## 8. 高级特性
+## 9. 高级特性
 
-### 8.1 订阅推送模式
+### 9.1 订阅推送模式
 
 模块可以订阅指定的 DataHub key，当该 key 的数据发生变化时，DataHub 会主动推送数据给订阅者，无需反复发送 `datahub:read` 事件。
 
@@ -289,7 +540,7 @@ datahub.write('vision:cube_position', {'x': 100, 'y': 200})
 
 **适用场景**：视觉模块实时更新方块位置，策略/执行模块需要立即获取最新数据。
 
-### 8.2 事件ACK + 超时重传
+### 9.2 事件ACK + 超时重传
 
 所有 `datahub:write` 和 `datahub:read` 操作都需要等待 DataHub 返回 ACK：
 - 超时时间：默认 1 秒
@@ -304,7 +555,7 @@ result = datahub.write_with_ack('vision:cube_position', {'x': 100}, timeout=1.0)
 data, success = datahub.read_with_ack('vision:cube_position', timeout=1.0)
 ```
 
-### 8.3 心跳保活机制
+### 9.3 心跳保活机制
 
 所有模块每秒发送一次 `module:heartbeat` 事件到 DataHub，DataHub 监控各模块的在线状态：
 - 心跳间隔：1 秒
@@ -324,7 +575,7 @@ status = datahub.get_module_status('vision_module')
 # online / offline / unknown
 ```
 
-### 8.4 轻量持久化
+### 9.4 轻量持久化
 
 DataHub 自动将关键数据持久化到 JSON 文件，重启后可恢复：
 - 持久化目录：默认 `data/`
@@ -339,7 +590,7 @@ datahub = get_datahub(persistence_dir='data')
 datahub.persist_now()
 ```
 
-### 8.5 动态任务调度器
+### 9.5 动态任务调度器
 
 TaskScheduler 支持任务优先级、抢占、中断恢复、可随时切换目标方块。
 
@@ -372,26 +623,26 @@ scheduler.on_task_complete(task_id, {'success': True})
 
 **任务状态**：`PENDING` → `RUNNING` → `COMPLETED` / `SUSPENDED` → `CANCELLED`
 
-## 9. 测试与验证方案
-### 8.1 单元测试
+## 10. 测试与验证方案
+### 10.1 单元测试
 - 视觉模块：测试不同光照/遮挡下识别准确率（置信度≥90%），验证`datahub:write`事件发送成功率、DataHub数据写入及时性，以及`datahub:read`/`datahub:data_return`事件的交互一致性；
 - 动作执行模块：单独测试导航精度（误差≤±5mm）、抓取/放置成功率（≥95%），验证`datahub:write`事件写入执行状态的准确性、`datahub:read`事件获取参数的完整性；
 - DataHub模块：测试监听`datahub:write`/`datahub:read`事件的响应率（≥99.9%），验证多线程并发事件触发下的数据一致性与锁机制有效性；
 - Blinker通信：测试`datahub:read`/`datahub:data_return`事件的关联成功率（≥99.9%），验证业务事件与DataHub交互事件的联动一致性；
 - 状态机逻辑：模拟状态切换场景，验证基于Blinker事件与DataHub交互的状态流转正确性。
 
-### 8.2 集成测试
+### 10.2 集成测试
 - 模块联调测试：验证“视觉发送`datahub:write`→发送业务事件→策略发送`datahub:read`→接收`datahub:data_return`→发送`datahub:write`→执行模块发送`datahub:read`→执行动作→发送`datahub:write`反馈状态”的全链路闭环，确保事件无丢失、数据无错误；
 - 异常模拟测试：模拟DataHub未响应`datahub:read`事件、Blinker业务事件丢失、视觉识别失败等场景，验证异常处理逻辑中`datahub:write`/`datahub:read`事件的触发有效性；
 - 全流程测试：在模拟竞赛场地中执行完整的“收集-放置-搭建”任务，记录任务完成时间、事件交互延迟、DataHub数据一致性。
 
-### 8.3 现场调试优化
+### 10.3 现场调试优化
 - 视觉参数调优：根据场地光照调整识别阈值，优化`datahub:write`事件发送频率，平衡识别精度与DataHub数据更新实时性；
 - 通信参数调优：调整`datahub:read`/`datahub:data_return`事件的超时阈值，优化request_id生成规则，提升数据读取效率；
 - 异常场景强化：补充现场高频异常类型（如临时遮挡、通信抖动），优化异常状态的`datahub:write`事件触发逻辑与业务事件联动规则。
 
-## 10. 附录：状态码与错误码定义
-### 10.1 状态码定义
+## 11. 附录：状态码与错误码定义
+### 11.1 状态码定义
 | 状态码 | 含义 |
 |--------|------|
 | 0 | 初始化定位状态 |
@@ -400,7 +651,7 @@ scheduler.on_task_complete(task_id, {'success': True})
 | 3 | 模块任务结束状态 |
 | -1 | 异常处理状态 |
 
-### 10.2 错误码定义
+### 11.2 错误码定义
 | 错误码 | 含义 |
 |--------|------|
 | 0 | 无错误，执行正常 |
