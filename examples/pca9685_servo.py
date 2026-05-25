@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import time
+from typing import Any, cast
 
 import board
 from adafruit_motor import servo
@@ -37,7 +38,7 @@ pca.frequency = 50
 # The pulse range is 750 - 2250 by default. This range typically gives 135 degrees of
 # range, but the default is to use 180 degrees. You can specify the expected range if you wish:
 # servo7 = servo.Servo(pca.channels[7], actuation_range=135)
-servo7 = servo.Servo(pca.channels[7])
+servo7 = servo.Servo(cast(Any, pca.channels[7]))
 
 # We sleep in the loops to give the servo time to move into position.
 for i in range(180):

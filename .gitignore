@@ -44,3 +44,5 @@ uv.lock
 
 # claude code
 .claude/
+
+.qwen/

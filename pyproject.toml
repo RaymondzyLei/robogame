@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "adafruit-circuitpython-motor>=3.4.20",
     "adafruit-circuitpython-pca9685>=3.4.22",
     "blinker>=1.9.0",
     "opencv-python>=4.13.0.92",
@@ -20,5 +21,7 @@ robogame = { workspace = true }
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.409",
+    "pytest>=9.0.3",
     "robogame",
 ]
